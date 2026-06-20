@@ -1,0 +1,73 @@
+name: 📋 Sync OpenAPI Spec
+
+on:
+  repository_dispatch:
+    types: [openapi-spec-updated]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  sync-openapi:
+    name: Download spec, generate TypeScript code, and open PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: ⬇️ Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: ✅ Validate payload
+        run: |
+          RUN_ID="${{ github.event.client_payload.run_id }}"
+          if ! [[ "$RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid run_id '$RUN_ID' — must be a numeric GitHub Actions run ID"
+            exit 1
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_ENV"
+
+      - name: 📦 Download OpenAPI spec artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: openapi-spec
+          path: ./src/schema/
+          github-token: ${{ secrets.CROSS_REPO_TOKEN }}
+          repository: CodeFlow-Dynamics/InmoBackend
+          run-id: ${{ env.run_id }}
+
+      - name: 🔍 Verify spec downloaded
+        run: |
+          SCHEMA_DIR="src/schema"
+          LATEST=$(ls -t "$SCHEMA_DIR"/swagger-*.json 2>/dev/null | head -1)
+          if [ -z "$LATEST" ]; then
+            echo "::error::No swagger-*.json found in $SCHEMA_DIR — artifact download may have failed"
+            exit 1
+          fi
+          echo "Found $(basename "$LATEST")"
+          cp "$LATEST" "$SCHEMA_DIR/schema.json"
+          rm "$LATEST"
+          echo "Copied to schema.json (removed timestamped copy)"
+          jq '.info' "$SCHEMA_DIR/schema.json"
+
+      - name: ⚙️ Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '27'
+          cache: npm
+
+      - name: ⚙️ Install dependencies
+        run: npm ci
+
+      - name: 🔄 Generate TypeScript code from OpenAPI spec
+        run: npm run generate
+
+      - name: 🏗️ Build SDK
+        run: npm run build
+
+      - name: 📤 Commit, push, and create PR
+        env:
+          GH_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
+        run: bash scripts/ci/sync-openapi-pr.sh
